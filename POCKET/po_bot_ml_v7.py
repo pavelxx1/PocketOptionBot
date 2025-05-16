@@ -32,7 +32,7 @@ CANDLES_SINCE_LAST_OPTIMIZATION = 0
 LAST_OPTIMIZATION_TIME = None
 SKIP_TRADE_AFTER_OPTIMIZATION = False
 FIRST_RUN = True
-SUCCESS_RATE = 0.54  # Минимальный винрейт для разрешения торговли
+SUCCESS_RATE = 0.65  # Минимальный винрейт для разрешения торговли
 MIN_TRADES_FOR_OPTIMIZATION = 4
 ENABLE_SKIP_AFTER_OPTIMIZATION = False
 
@@ -58,6 +58,11 @@ POPULATION_SIZE = 30  # Размер популяции для генетиче�
 NUM_GENERATIONS = 5   # Количество поколений
 MUTATION_RATE = 0.2   # Вероятность мутации
 TOP_PARENTS = 5       # Количество лучших решений для скрещивания
+
+# Глобальные параметры
+USE_PREVIOUS_PARAMS = True  # Включить использование предыдущих лучших параметров
+PREVIOUS_BEST_PARAMS = []   # Список предыдущих лучших параметров
+MAX_PREVIOUS_PARAMS = 5     # Максимальное количество сохраняемых лучших параметров
 
 # Диапазоны параметров для каждого продвинутого индикатора
 INDICATOR_PARAMS = {
@@ -729,15 +734,129 @@ def evaluate_population(population, data, min_trades=10):
     
     return valid_results
 
+# def optimize_strategy_parameters(quotes, min_trades=10):
+#     """Оптимизация всех параметров стратегии с помощью генетического алгоритма"""
+#     global OPTIMIZED_PARAMS, SIGNAL_THRESHOLD
+    
+#     print("Запуск комплексной оптимизации параметров стратегии...")
+#     prepared_data = prepare_data_for_parallel(quotes)
+    
+#     # Создаем начальную популяцию из случайных наборов параметров
+#     population = [StrategyParameters.create_random() for _ in range(POPULATION_SIZE)]
+    
+#     best_result = None
+    
+#     # Эволюция на протяжении нескольких поколений
+#     for generation in range(NUM_GENERATIONS):
+#         print(f"Оптимизация: поколение {generation+1}/{NUM_GENERATIONS}")
+        
+#         # Оценка текущей популяции
+#         results = evaluate_population(population, prepared_data, min_trades)
+        
+#         # Сохраняем лучший результат всех поколений
+#         if results and (best_result is None or results[0]['winrate'] > best_result['winrate']):
+#             best_result = results[0]
+        
+#         # В последнем поколении не создаем новую популяцию
+#         if generation == NUM_GENERATIONS - 1:
+#             break
+        
+#         # Отбор лучших особей для размножения
+#         parents = [result['params'] for result in results[:TOP_PARENTS]] if results else population[:TOP_PARENTS]
+        
+#         # Создание новой популяции
+#         new_population = []
+        
+#         # Элитизм - сохраняем лучших родителей
+#         new_population.extend(parents[:2])
+        
+#         # Заполняем остальную популяцию потомками
+#         while len(new_population) < POPULATION_SIZE:
+#             # Выбираем двух случайных родителей из лучших
+#             parent1 = random.choice(parents)
+#             parent2 = random.choice(parents)
+            
+#             # Создаем нового потомка скрещиванием и мутацией
+#             child = StrategyParameters.crossover(parent1, parent2)
+#             child.mutate()
+            
+#             new_population.append(child)
+        
+#         population = new_population
+    
+#     # Если не удалось найти хороший набор параметров
+#     if best_result is None:
+#         print("[WARN] Не удалось найти оптимальные параметры, используем настройки по умолчанию")
+#         return OPTIMIZED_PARAMS, 0
+    
+#     # Обновляем глобальные параметры лучшим набором
+#     OPTIMIZED_PARAMS = best_result['params']
+#     SIGNAL_THRESHOLD = best_result['params'].signal_threshold
+    
+#     print("\n=== ЛУЧШИЕ НАЙДЕННЫЕ ПАРАМЕТРЫ ===")
+#     for indicator, params in OPTIMIZED_PARAMS.to_dict().items():
+#         if indicator != 'signal_threshold':
+#             print(f"► {indicator}: {params}")
+#     print(f"► Порог силы сигнала: {SIGNAL_THRESHOLD}")
+#     print(f"► Винрейт: {best_result['winrate']*100:.1f}% ({best_result['wins']}/{best_result['total']} сделок)")
+    
+#     return OPTIMIZED_PARAMS, best_result['winrate']
+
+def are_params_similar(params1, params2, threshold=0.95):
+    """Проверяет, насколько похожи два набора параметров"""
+    # Это упрощенная проверка - можно настроить более сложную логику
+    dict1 = params1.to_dict()
+    dict2 = params2.to_dict()
+    
+    # Проверяем signal_threshold
+    if dict1['signal_threshold'] != dict2['signal_threshold']:
+        return False
+    
+    # Проверяем индикаторы
+    for indicator in dict1:
+        if indicator == 'signal_threshold':
+            continue
+            
+        # Если хотя бы один параметр отличается - наборы разные
+        for param, value in dict1[indicator].items():
+            if param not in dict2[indicator] or dict2[indicator][param] != value:
+                return False
+    
+    return True
+
 def optimize_strategy_parameters(quotes, min_trades=10):
     """Оптимизация всех параметров стратегии с помощью генетического алгоритма"""
-    global OPTIMIZED_PARAMS, SIGNAL_THRESHOLD
+    global OPTIMIZED_PARAMS, SIGNAL_THRESHOLD, PREVIOUS_BEST_PARAMS
     
     print("Запуск комплексной оптимизации параметров стратегии...")
     prepared_data = prepare_data_for_parallel(quotes)
     
-    # Создаем начальную популяцию из случайных наборов параметров
-    population = [StrategyParameters.create_random() for _ in range(POPULATION_SIZE)]
+    # Создаем начальную популяцию
+    population = []
+    
+    # Если включено использование предыдущих параметров - добавляем их в популяцию
+    if USE_PREVIOUS_PARAMS and PREVIOUS_BEST_PARAMS:
+        # НОВЫЙ КОД: Переоценка сохраненных параметров на новых данных
+        updated_previous_params = []
+        for params in PREVIOUS_BEST_PARAMS:
+            # Проверка эффективности параметров на текущих данных
+            result = test_strategy_parameters(params, prepared_data, min_trades)
+            # Если винрейт всё ещё хороший - сохраняем
+            if result['total'] >= min_trades and result['winrate'] >= SUCCESS_RATE:
+                updated_previous_params.append(params)
+                print(f"[DEBUG] Параметр сохранен: винрейт {result['winrate']*100:.1f}%")
+            else:
+                print(f"[DEBUG] Параметр удален: винрейт {result['winrate']*100:.1f}%")
+        
+        # Обновляем список сохраненных параметров
+        PREVIOUS_BEST_PARAMS = updated_previous_params
+        
+        print(f"[DEBUG] Добавление {len(PREVIOUS_BEST_PARAMS)} актуальных предыдущих параметров в начальную популяцию")
+        population.extend(PREVIOUS_BEST_PARAMS)
+    
+    # Дополняем остаток популяции случайными параметрами
+    while len(population) < POPULATION_SIZE:
+        population.append(StrategyParameters.create_random())
     
     best_result = None
     
@@ -787,6 +906,19 @@ def optimize_strategy_parameters(quotes, min_trades=10):
     # Обновляем глобальные параметры лучшим набором
     OPTIMIZED_PARAMS = best_result['params']
     SIGNAL_THRESHOLD = best_result['params'].signal_threshold
+    
+    # Сохраняем лучшие параметры для будущих оптимизаций
+    if USE_PREVIOUS_PARAMS:
+        # Создаем копию параметров
+        best_params_copy = copy.deepcopy(best_result['params'])
+        
+        # Добавляем в список, если такой комбинации еще нет
+        if not any(are_params_similar(best_params_copy, prev) for prev in PREVIOUS_BEST_PARAMS):
+            PREVIOUS_BEST_PARAMS.append(best_params_copy)
+            
+            # Ограничиваем размер списка предыдущих параметров
+            if len(PREVIOUS_BEST_PARAMS) > MAX_PREVIOUS_PARAMS:
+                PREVIOUS_BEST_PARAMS.pop(0)  # Удаляем самый старый набор
     
     print("\n=== ЛУЧШИЕ НАЙДЕННЫЕ ПАРАМЕТРЫ ===")
     for indicator, params in OPTIMIZED_PARAMS.to_dict().items():
@@ -1242,6 +1374,7 @@ def websocket_log():
         PERIOD = 0
         CANDLES_SINCE_LAST_OPTIMIZATION = 0
         FIRST_RUN = True  # Сбрасываем флаг при смене валютной пары
+        PREVIOUS_BEST_PARAMS = []
 
     global INITIAL_DEPOSIT
 
