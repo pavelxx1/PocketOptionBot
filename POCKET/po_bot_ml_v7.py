@@ -1357,6 +1357,7 @@ def append_json(data, filename='output.json'):
 def websocket_log():
     global CURRENCY, CURRENCY_CHANGE, CURRENCY_CHANGE_DATE, PERIOD, CANDLES, CANDLES_SINCE_LAST_OPTIMIZATION
     global FIRST_RUN
+    global PREVIOUS_BEST_PARAMS
     
     try:
         current_symbol = driver.find_element(by=By.CLASS_NAME, value='current-symbol').text
