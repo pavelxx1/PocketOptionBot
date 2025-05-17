@@ -14,6 +14,7 @@ from multiprocessing import cpu_count
 import copy
 from scipy.stats import norm
 from scipy import signal
+from binance import fetch_all_usdt_pairs
 
 BASE_URL = 'https://pocketoption.com'
 PERIOD = 0
@@ -32,7 +33,7 @@ CANDLES_SINCE_LAST_OPTIMIZATION = 0
 LAST_OPTIMIZATION_TIME = None
 SKIP_TRADE_AFTER_OPTIMIZATION = False
 FIRST_RUN = True
-SUCCESS_RATE = 0.65  # Минимальный винрейт для разрешения торговли
+SUCCESS_RATE = 0.7  # Минимальный винрейт для разрешения торговли
 MIN_TRADES_FOR_OPTIMIZATION = 4
 ENABLE_SKIP_AFTER_OPTIMIZATION = False
 
@@ -54,13 +55,13 @@ PUT_ENABLED = True   # Разрешение торговли в направле
 SIGNAL_THRESHOLD = 0.2
 
 # Параметры для оптимизации
-POPULATION_SIZE = 30  # Размер популяции для генетического алгоритма
-NUM_GENERATIONS = 5   # Количество поколений
-MUTATION_RATE = 0.2   # Вероятность мутации
+POPULATION_SIZE = 50  # Размер популяции для генетического алгоритма
+NUM_GENERATIONS = 15   # Количество поколений
+MUTATION_RATE = 0.25   # Вероятность мутации
 TOP_PARENTS = 5       # Количество лучших решений для скрещивания
 
 # Глобальные параметры
-USE_PREVIOUS_PARAMS = True  # Включить использование предыдущих лучших параметров
+USE_PREVIOUS_PARAMS = False  # Включить использование предыдущих лучших параметров
 PREVIOUS_BEST_PARAMS = []   # Список предыдущих лучших параметров
 MAX_PREVIOUS_PARAMS = 5     # Максимальное количество сохраняемых лучших параметров
 
@@ -275,7 +276,7 @@ class StrategyParameters:
 # Глобальный экземпляр оптимизированных параметров
 OPTIMIZED_PARAMS = StrategyParameters()
 
-driver = get_driver()
+# driver = get_driver()
 
 def load_web_driver():
     url = f'{BASE_URL}/en/cabinet/demo-quick-high-low/'
@@ -675,21 +676,27 @@ def test_strategy_parameters(params, data, min_trades=10):
             
             # Проверка всех свечей в диапазоне
             if ALL_CANDLES_SHOULD_MATCH:
-                # Для CALL проверяем, что все свечи выше
+                # Для CALL проверяем, что каждая следующая свеча выше предыдущей
                 if last_signal['signal'] == 'call':
                     win = True
+                    prev_close = current_close
                     for j in range(1, future_check+1):
-                        if data[i+j]['close'] <= current_close:
+                        current_future_close = data[i+j]['close']
+                        if current_future_close <= prev_close:
                             win = False
                             break
+                        prev_close = current_future_close
                     result = 'win' if win else 'loss'
-                # Для PUT проверяем, что все свечи ниже
+                # Для PUT проверяем, что каждая следующая свеча ниже предыдущей
                 elif last_signal['signal'] == 'put':
                     win = True
+                    prev_close = current_close
                     for j in range(1, future_check+1):
-                        if data[i+j]['close'] >= current_close:
+                        current_future_close = data[i+j]['close']
+                        if current_future_close >= prev_close:
                             win = False
                             break
+                        prev_close = current_future_close
                     result = 'win' if win else 'loss'
             else:
                 # Проверка только последней свечи в диапазоне
@@ -734,73 +741,6 @@ def evaluate_population(population, data, min_trades=10):
     
     return valid_results
 
-# def optimize_strategy_parameters(quotes, min_trades=10):
-#     """Оптимизация всех параметров стратегии с помощью генетического алгоритма"""
-#     global OPTIMIZED_PARAMS, SIGNAL_THRESHOLD
-    
-#     print("Запуск комплексной оптимизации параметров стратегии...")
-#     prepared_data = prepare_data_for_parallel(quotes)
-    
-#     # Создаем начальную популяцию из случайных наборов параметров
-#     population = [StrategyParameters.create_random() for _ in range(POPULATION_SIZE)]
-    
-#     best_result = None
-    
-#     # Эволюция на протяжении нескольких поколений
-#     for generation in range(NUM_GENERATIONS):
-#         print(f"Оптимизация: поколение {generation+1}/{NUM_GENERATIONS}")
-        
-#         # Оценка текущей популяции
-#         results = evaluate_population(population, prepared_data, min_trades)
-        
-#         # Сохраняем лучший результат всех поколений
-#         if results and (best_result is None or results[0]['winrate'] > best_result['winrate']):
-#             best_result = results[0]
-        
-#         # В последнем поколении не создаем новую популяцию
-#         if generation == NUM_GENERATIONS - 1:
-#             break
-        
-#         # Отбор лучших особей для размножения
-#         parents = [result['params'] for result in results[:TOP_PARENTS]] if results else population[:TOP_PARENTS]
-        
-#         # Создание новой популяции
-#         new_population = []
-        
-#         # Элитизм - сохраняем лучших родителей
-#         new_population.extend(parents[:2])
-        
-#         # Заполняем остальную популяцию потомками
-#         while len(new_population) < POPULATION_SIZE:
-#             # Выбираем двух случайных родителей из лучших
-#             parent1 = random.choice(parents)
-#             parent2 = random.choice(parents)
-            
-#             # Создаем нового потомка скрещиванием и мутацией
-#             child = StrategyParameters.crossover(parent1, parent2)
-#             child.mutate()
-            
-#             new_population.append(child)
-        
-#         population = new_population
-    
-#     # Если не удалось найти хороший набор параметров
-#     if best_result is None:
-#         print("[WARN] Не удалось найти оптимальные параметры, используем настройки по умолчанию")
-#         return OPTIMIZED_PARAMS, 0
-    
-#     # Обновляем глобальные параметры лучшим набором
-#     OPTIMIZED_PARAMS = best_result['params']
-#     SIGNAL_THRESHOLD = best_result['params'].signal_threshold
-    
-#     print("\n=== ЛУЧШИЕ НАЙДЕННЫЕ ПАРАМЕТРЫ ===")
-#     for indicator, params in OPTIMIZED_PARAMS.to_dict().items():
-#         if indicator != 'signal_threshold':
-#             print(f"► {indicator}: {params}")
-#     print(f"► Порог силы сигнала: {SIGNAL_THRESHOLD}")
-#     print(f"► Винрейт: {best_result['winrate']*100:.1f}% ({best_result['wins']}/{best_result['total']} сделок)")
-    
-#     return OPTIMIZED_PARAMS, best_result['winrate']
 
 def are_params_similar(params1, params2, threshold=0.95):
     """Проверяет, насколько похожи два набора параметров"""
@@ -1308,11 +1248,11 @@ def check_data():
                 if last_signal['signal'] == 'put':
                     print(f"[DEBUG] Пытаюсь выполнить PUT...")
                     do_action('put')
-                    print(f"....make SELL (экспирация: {expiry_time} мин)")
+                    print(f"\n✪✪✪✪✪✪........make SELL (экспирация: {expiry_time} мин)\n")
                 elif last_signal['signal'] == 'call':
                     print(f"[DEBUG] Пытаюсь выполнить CALL...")
                     do_action('call')
-                    print(f"....make BUY (экспирация: {expiry_time} мин)")
+                    print(f"\n✪✪✪✪✪✪........make BUY (экспирация: {expiry_time} мин)\n")
             else:
                 if not TRADING_ALLOWED:
                     print("[DEBUG] Сигнал проигнорирован: торговля не разрешена")
@@ -1358,6 +1298,8 @@ def websocket_log():
     global CURRENCY, CURRENCY_CHANGE, CURRENCY_CHANGE_DATE, PERIOD, CANDLES, CANDLES_SINCE_LAST_OPTIMIZATION
     global FIRST_RUN
     global PREVIOUS_BEST_PARAMS
+
+
     
     try:
         current_symbol = driver.find_element(by=By.CLASS_NAME, value='current-symbol').text
@@ -1387,6 +1329,17 @@ def websocket_log():
         print(e)    
 
     INITIAL_DEPOSIT = deposit   
+
+    # click on Banner if found
+    try:
+        # Проверяем наличие кнопки и кликаем, если найдена
+        close_button = driver.find_element(By.CSS_SELECTOR, "body > div:nth-child(30) > div > div > div > div.btn-wrap > a")
+        if close_button.is_displayed():
+            print("[DEBUG] Найдена кнопка баннера, выполняю клик")
+            close_button.click()
+    except Exception as e:
+        # Кнопка не найдена или другая ошибка - игнорируем
+        pass    
 
     for wsData in driver.get_log('performance'):
         message = json.loads(wsData['message'])['message']
@@ -1425,6 +1378,7 @@ def websocket_log():
                 if tstamp % PERIOD == 0:
                     if tstamp not in [c[0] for c in CANDLES]:
                         CANDLES.append([tstamp, current_value, current_value, current_value, current_value])
+
                         # Увеличиваем счетчик свечей для периодической оптимизации
                         CANDLES_SINCE_LAST_OPTIMIZATION += 1
                         try:
@@ -1462,9 +1416,21 @@ if __name__ == '__main__':
     
     print(f"\n=== ДИАПАЗОНЫ ПОРОГА СИЛЫ СИГНАЛА ===")
     print(f"► {STRATEGY_PARAMS['signal_threshold']}")
+
+
+    CANDLES_SINCE_LAST_OPTIMIZATION = 0
+    candles_data = fetch_all_usdt_pairs(timeframe='1d', candle_limit=80, specific_pair='BTCUSDT')
+    for pair, CANDLES in candles_data.items():
+        print(f"\n\n---[Пара: {pair}]---")
+        # print(candles)  # Выводит весь массив свечей для пары
+        # print("-" * 50)  # Разделитель между парами 
+        check_data()  
+        CANDLES_SINCE_LAST_OPTIMIZATION += 1 
+
+    # load_web_driver()
+    # from time import sleep
+    # while True:
+    #     websocket_log()
+    #     sleep(0.1)
+
     
-    load_web_driver()
-    from time import sleep
-    while True:
-        websocket_log()
-        sleep(0.1)
