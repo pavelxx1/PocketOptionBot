@@ -16,6 +16,11 @@ from scipy.stats import norm
 from scipy import signal
 from binance import fetch_all_usdt_pairs
 
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.patches import Rectangle
+from matplotlib.lines import Line2D
+
 BASE_URL = 'https://pocketoption.com'
 PERIOD = 0
 CANDLES = []
@@ -26,6 +31,8 @@ CURRENCY_CHANGE = False
 INITIAL_DEPOSIT = None
 CURRENCY_CHANGE_DATE = datetime.now()
 
+# driver = get_driver()
+
 # Глобальные параметры для настройки
 OPTIMIZATION_ENABLED = 1
 OPTIMIZATION_PERIOD = 1  # Оптимизация каждые N свечей
@@ -33,7 +40,7 @@ CANDLES_SINCE_LAST_OPTIMIZATION = 0
 LAST_OPTIMIZATION_TIME = None
 SKIP_TRADE_AFTER_OPTIMIZATION = False
 FIRST_RUN = True
-SUCCESS_RATE = 0.7  # Минимальный винрейт для разрешения торговли
+SUCCESS_RATE = 0.54  # Минимальный винрейт для разрешения торговли
 MIN_TRADES_FOR_OPTIMIZATION = 4
 ENABLE_SKIP_AFTER_OPTIMIZATION = False
 
@@ -41,7 +48,7 @@ ENABLE_SKIP_AFTER_OPTIMIZATION = False
 SEPARATE_DIRECTION_FILTER = True  # Включить фильтрацию по отдельным направлениям
 
 # Параметры для проверки будущих свечей
-FUTURE_CHECK_PERIODS = 2  # Количество свечей для проверки
+FUTURE_CHECK_PERIODS = 5  # Количество свечей для проверки
 ALL_CANDLES_SHOULD_MATCH = True  # Требовать соответствия всех свечей
 
 IS_AMOUNT_SET = False
@@ -53,6 +60,7 @@ PUT_ENABLED = True   # Разрешение торговли в направле
 
 # Глобальный порог силы сигнала (будет оптимизирован)
 SIGNAL_THRESHOLD = 0.2
+VISUALIZE_ENABLED = True
 
 # Параметры для оптимизации
 POPULATION_SIZE = 50  # Размер популяции для генетического алгоритма
@@ -276,7 +284,6 @@ class StrategyParameters:
 # Глобальный экземпляр оптимизированных параметров
 OPTIMIZED_PARAMS = StrategyParameters()
 
-# driver = get_driver()
 
 def load_web_driver():
     url = f'{BASE_URL}/en/cabinet/demo-quick-high-low/'
@@ -957,6 +964,10 @@ def get_detailed_strategy_results(quotes, params):
     call_winrate = call_wins / call_total if call_total > 0 else 0
     put_winrate = put_wins / put_total if put_total > 0 else 0
     
+    # print(f"СТАТИСТИКА: всего {len(trades_data)} сделок:")
+    # for trade in trades_data:
+    #     print(f"  - {trade['date']} {trade['signal']} (score: {trade['score']:.2f})")
+
     return {
         'winrate': winrate,
         'wins': wins,
@@ -970,6 +981,142 @@ def get_detailed_strategy_results(quotes, params):
         'put_total': put_total,
         'trades_data': trades_data
     }
+
+
+def visualize_strategy(quotes, signals, params, future_check_periods=FUTURE_CHECK_PERIODS):
+    """Визуализация японских свечей и точек входа/выхода"""
+    if not signals or len(signals) == 0:
+        print("Нет сигналов для визуализации")
+        return
+    
+    # Создаем директорию и DataFrame
+    os.makedirs('plotting', exist_ok=True)
+    
+    df = pd.DataFrame([{
+        'date': q.date if hasattr(q, 'date') else pd.Timestamp(q['date']),
+        'open': float(get_value(q, 'open')) if hasattr(q, 'date') else q['open'],
+        'high': float(get_value(q, 'high')) if hasattr(q, 'date') else q['high'],
+        'low': float(get_value(q, 'low')) if hasattr(q, 'date') else q['low'],
+        'close': float(get_value(q)) if hasattr(q, 'date') else q['close']
+    } for q in quotes])
+    
+    # Корректируем high/low значения
+    for idx in df.index:
+        df.loc[idx, 'high'] = max(df.loc[idx, 'high'], df.loc[idx, 'open'], df.loc[idx, 'close'])
+        df.loc[idx, 'low'] = min(df.loc[idx, 'low'], df.loc[idx, 'open'], df.loc[idx, 'close'])
+    
+    # Настраиваем график и готовим данные
+    fig, ax = plt.subplots(figsize=(15, 8))
+    dates_num = mdates.date2num(df['date'])
+    ohlc = np.column_stack((dates_num, df['open'].values, df['high'].values, df['low'].values, df['close'].values))
+    
+    # Рисуем свечи
+    for i, (date, open_price, high, low, close) in enumerate(ohlc):
+        # Рассчитываем параметры свечи
+        is_bullish = close >= open_price
+        candle_color = 'white' if is_bullish else 'black'
+        width = (ohlc[i+1, 0] - date) * 0.8 if i < len(ohlc) - 1 else (dates_num[-1] - dates_num[0]) / len(dates_num) * 0.8
+        rect_height = max(abs(close - open_price), 0.001)  # Защита от нулевой высоты
+        
+        # Рисуем тело свечи
+        ax.add_patch(Rectangle(
+            (date - width/2, min(open_price, close)),
+            width, rect_height,
+            facecolor=candle_color, edgecolor='black', linewidth=1, zorder=2
+        ))
+        
+        # Рисуем тени
+        ax.plot([date, date], [low, min(open_price, close)], color='black', linewidth=1, zorder=1)
+        ax.plot([date, date], [max(open_price, close), high], color='black', linewidth=1, zorder=1)
+    
+    # Обрабатываем сигналы DataFrame
+    signals_df = pd.DataFrame(signals)
+    signals_df['date'] = pd.to_datetime(signals_df['date'])
+
+    # 1. Сначала применяем смещение дат
+    tf_minutes = (df.iloc[1]['date'] - df.iloc[0]['date']).total_seconds() / 60
+    signals_df['date'] = signals_df['date'] + pd.Timedelta(minutes=tf_minutes)
+
+    # 2. Затем отсекаем по дате
+    max_allowed_index = len(df) - future_check_periods - 2
+    max_allowed_date = df.iloc[max_allowed_index]['date'] if max_allowed_index >= 0 else df.iloc[0]['date']
+    signals_df = signals_df[signals_df['date'] <= max_allowed_date]    
+
+    trade_signals = signals_df[signals_df['signal'].isin(['call', 'put'])]
+    trade_id = 0
+    
+    # Отображаем сигналы
+    for _, signal in trade_signals.iterrows():
+        signal_strength = abs(signal['score'] - 0.5) * 2
+        threshold_condition = signal['signal'] != 'neutral' and signal_strength >= params.signal_threshold
+        if not threshold_condition:
+            continue
+            
+        # Находим индекс даты входа
+        idx = df[df['date'] == signal['date']].index
+        if len(idx) == 0:
+            continue
+            
+        idx = idx[0]
+        
+        # Исключаем сделки с недостаточным количеством будущих свечей для проверки
+        if idx + future_check_periods >= len(df):
+            continue
+            
+        trade_id += 1
+        entry_color = 'blue' if signal['signal'] == 'call' else 'purple'
+        entry_marker = '^' if signal['signal'] == 'call' else 'v'
+        
+        entry_date, entry_price = signal['date'], df.iloc[idx]['close']
+        exit_date = df.iloc[idx + future_check_periods]['date']
+        exit_price = df.iloc[idx + future_check_periods]['close']
+        
+        # Определяем результат сделки
+        win = (signal['signal'] == 'call' and exit_price > entry_price) or (signal['signal'] == 'put' and exit_price < entry_price)
+        result_color = 'green' if win else 'red'
+        
+        # Отображаем точки входа/выхода с большей прозрачностью
+        ax.scatter(entry_date, entry_price, marker=entry_marker, color=entry_color, s=120, alpha=0.7, zorder=5)
+        ax.scatter(exit_date, exit_price, marker='o', color=result_color, s=100, alpha=0.7, zorder=5)
+        
+        # Рисуем "крышу" с полупрозрачной линией
+        roof_height = max(entry_price, exit_price) * 1.001
+        ax.plot([entry_date, entry_date, exit_date, exit_date], 
+                [entry_price, roof_height, roof_height, exit_price], 
+                color=result_color, linestyle='-', alpha=0.5, linewidth=1.5)
+        
+        # Добавляем номер сделки (делаем более прозрачным)
+        mid_point = entry_date + (exit_date - entry_date) / 2
+        ax.text(mid_point, roof_height, f'#{trade_id}', color=result_color, fontweight='bold', 
+                ha='center', va='bottom', alpha=0.7)
+        
+        # print(f"ВИЗУАЛИЗАЦИЯ: сделка #{trade_id} в {entry_date} {signal['signal']} (score: {signal['score']:.2f})")
+    
+    # Настройка графика
+    ax.set_title('Market Analysis with Entry/Exit Points')
+    ax.set_ylabel('Price')
+    ax.set_xlabel('Date')
+    ax.grid(True, alpha=0.15)  # Также делаем сетку менее заметной
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+    ax.xaxis_date()
+    plt.xticks(rotation=45)
+    
+    # Добавляем легенду
+    legend_elements = [
+        Line2D([0], [0], marker='^', color='blue', linestyle='None', markersize=10, label='CALL Entry'),
+        Line2D([0], [0], marker='v', color='purple', linestyle='None', markersize=10, label='PUT Entry'),
+        Line2D([0], [0], marker='o', color='green', linestyle='None', markersize=10, label='Win Exit'),
+        Line2D([0], [0], marker='o', color='red', linestyle='None', markersize=10, label='Loss Exit')
+    ]
+    ax.legend(handles=legend_elements, loc='upper left')
+    
+    # Сохраняем и показываем график
+    plt.tight_layout()
+    filename = os.path.join('plotting', f'trading_chart_{pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")}.png')
+    plt.savefig(filename)
+    print(f"График сохранен как {filename}")
+    plt.show()
+    plt.close()
 
 def market_microstructure_analysis(quotes, params=None):
     """Анализ рынка с продвинутыми индикаторами для исходных данных quotes"""
@@ -1147,7 +1294,7 @@ def check_data():
     global FIRST_RUN, TRADING_ALLOWED, SIGNAL_THRESHOLD, CALL_ENABLED, PUT_ENABLED
     
     try:
-        quotes = get_quotes(CANDLES)[-100:]
+        quotes = get_quotes(CANDLES)[-80:]
         
         if len(quotes) < 20:
             print("Недостаточно данных для анализа")
@@ -1211,6 +1358,9 @@ def check_data():
         
         # Анализируем рынок с оптимизированными параметрами
         signals = market_microstructure_analysis(quotes, OPTIMIZED_PARAMS)
+
+        if VISUALIZE_ENABLED and (signals and len(signals) > 0):
+            visualize_strategy(quotes, signals, OPTIMIZED_PARAMS)        
         
         if signals and len(signals) > 0:
             last_signal = signals[-1]
@@ -1333,7 +1483,8 @@ def websocket_log():
     # click on Banner if found
     try:
         # Проверяем наличие кнопки и кликаем, если найдена
-        close_button = driver.find_element(By.CSS_SELECTOR, "body > div:nth-child(30) > div > div > div > div.btn-wrap > a")
+        # close_button = driver.find_element(By.CSS_SELECTOR, "body > div:nth-child(30) > div > div > div > div.btn-wrap > a")
+        close_button = driver.find_element(By.CSS_SELECTOR, "body > div:nth-child(30) > div > div > div > a")
         if close_button.is_displayed():
             print("[DEBUG] Найдена кнопка баннера, выполняю клик")
             close_button.click()
@@ -1419,7 +1570,7 @@ if __name__ == '__main__':
 
 
     CANDLES_SINCE_LAST_OPTIMIZATION = 0
-    candles_data = fetch_all_usdt_pairs(timeframe='1d', candle_limit=80, specific_pair='BTCUSDT')
+    candles_data = fetch_all_usdt_pairs(timeframe='15m', candle_limit=100, specific_pair='BTCUSDT')
     for pair, CANDLES in candles_data.items():
         print(f"\n\n---[Пара: {pair}]---")
         # print(candles)  # Выводит весь массив свечей для пары
@@ -1433,4 +1584,3 @@ if __name__ == '__main__':
     #     websocket_log()
     #     sleep(0.1)
 
-    
